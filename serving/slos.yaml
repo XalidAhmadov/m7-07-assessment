@@ -1,0 +1,49 @@
+# Service Level Objectives — RecoServe (Scenario X)
+# Canonical numbers shared with README, capacity-plan.md, monitoring/alerts.yaml,
+# and runbooks/rollback.md. Burn-rate alert windows live in monitoring/alerts.yaml.
+
+service: recoserve-recommendations
+owner: recoserve-platform
+scenario: X-personalized-recommendations
+
+slos:
+  - id: availability
+    description: Fraction of valid requests served without a 5xx.
+    sli: "1 - (5xx responses / total valid responses)"
+    objective: 0.999            # 99.9% over rolling 30 days
+    window: 30d
+    error_budget: 0.001         # 0.1% == ~43.2 min/30d
+    measured_at: api-gateway
+
+  - id: latency-p95
+    description: End-to-end p95 latency for POST /recommendations (sync hot path).
+    sli: "p95(request_duration_seconds)"
+    objective_ms: 120           # == README + capacity-plan end-to-end budget
+    server_side_target_ms: 70   # == Canary gate in lifecycle/model-registry.yaml
+    window: 30d
+    measured_at: api-gateway
+
+  - id: latency-p99
+    description: End-to-end p99 latency guardrail (catch tail blowups).
+    sli: "p99(request_duration_seconds)"
+    objective_ms: 250
+    window: 30d
+    measured_at: api-gateway
+
+  - id: cold-start-coverage
+    description: Cold-start requests that still return a non-empty recommendation list.
+    sli: "non_empty_responses{cold_start=true} / requests{cold_start=true}"
+    objective: 0.999
+    window: 30d
+
+  - id: freshness
+    description: Online feature store lag for 30-day user signals.
+    sli: "max(feature_store_ingest_lag_seconds)"
+    objective_seconds: 900      # 15-min micro-batch (open question #3 in README)
+    window: 1d
+
+# Error-budget policy: if availability budget for 30d is >50% consumed, model promotions
+# to Production are frozen (lifecycle gate) until burn is back under control.
+error_budget_policy:
+  freeze_promotions_at_consumed: 0.5
+  page_at: see monitoring/alerts.yaml (multi-window burn-rate)

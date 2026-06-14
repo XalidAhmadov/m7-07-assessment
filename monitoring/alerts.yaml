@@ -1,0 +1,105 @@
+# Monitoring & Alerts — RecoServe (Scenario X)
+# Prometheus-style rules. Thresholds are derived from serving/slos.yaml and are the SAME
+# triggers referenced by runbooks/rollback.md. Burn-rate uses multi-window (fast + slow).
+
+groups:
+  # --- Multi-window burn-rate on the 99.9% availability SLO (43.2 min budget / 30d) ------
+  - name: recoserve-availability-burn-rate
+    rules:
+      - alert: AvailabilityFastBurn
+        # 14.4x burn over 1h (with 5m short window) => budget gone in ~2 days. Page.
+        expr: |
+          (
+            job:slo_error_ratio:rate1h{service="recoserve"} > (14.4 * 0.001)
+            and
+            job:slo_error_ratio:rate5m{service="recoserve"} > (14.4 * 0.001)
+          )
+        labels: { severity: page, slo: availability }
+        annotations:
+          summary: "Fast availability burn — error budget exhausting in ~2 days"
+          runbook: runbooks/rollback.md#trigger-1-availability-fast-burn
+
+      - alert: AvailabilitySlowBurn
+        # 6x burn over 6h (with 30m short window) => sustained erosion. Page.
+        expr: |
+          (
+            job:slo_error_ratio:rate6h{service="recoserve"} > (6 * 0.001)
+            and
+            job:slo_error_ratio:rate30m{service="recoserve"} > (6 * 0.001)
+          )
+        labels: { severity: page, slo: availability }
+        annotations:
+          summary: "Slow availability burn — sustained error-budget erosion"
+          runbook: runbooks/rollback.md#trigger-2-availability-slow-burn
+
+  # --- Latency SLO (120 ms p95 end-to-end, serving/slos.yaml) ----------------------------
+  - name: recoserve-latency
+    rules:
+      - alert: LatencyP95Breach
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(request_duration_seconds_bucket{service="recoserve"}[10m])) by (le)
+          ) > 0.120
+        for: 10m
+        labels: { severity: page, slo: latency }
+        annotations:
+          summary: "End-to-end p95 > 120 ms for 10m"
+          runbook: runbooks/rollback.md#trigger-3-latency-p95-breach
+
+  # --- Model-version mismatch (uses X-Model-Version from api/openapi.yaml) ----------------
+  - name: recoserve-model-version
+    rules:
+      - alert: ModelVersionMismatch
+        # Served X-Model-Version != version the experiment config expects for that arm.
+        # Catches a bad mount, a half-rolled deploy, or arm/version routing drift (ADR-0002).
+        expr: |
+          sum(rate(served_model_version_mismatch_total{service="recoserve"}[5m])) > 0
+        for: 5m
+        labels: { severity: page, category: integrity }
+        annotations:
+          summary: "Served X-Model-Version does not match expected version for the arm"
+          runbook: runbooks/rollback.md#trigger-4-model-version-mismatch
+
+      - alert: UnexpectedModelVersionServing
+        # Any model version in production not in {control,treatment} of the active experiment.
+        expr: |
+          count(count by (model_version) (
+            served_requests_total{service="recoserve", env="production"}
+          ) unless on(model_version) experiment_allowed_model_version) > 0
+        for: 5m
+        labels: { severity: page, category: integrity }
+        annotations:
+          summary: "An unapproved model version is serving production traffic"
+          runbook: runbooks/rollback.md#trigger-4-model-version-mismatch
+
+  # --- Data / prediction drift -----------------------------------------------------------
+  - name: recoserve-drift
+    rules:
+      - alert: FeatureDriftHigh
+        # PSI of key user features vs the training snapshot baseline (registry lineage).
+        expr: feature_population_stability_index{service="recoserve"} > 0.2
+        for: 30m
+        labels: { severity: ticket, category: drift }
+        annotations:
+          summary: "Feature drift (PSI > 0.2) vs training baseline — investigate retrain"
+          runbook: runbooks/rollback.md#trigger-5-drift-or-quality-drop
+
+      - alert: ColdStartRateSpike
+        # Sudden rise in cold-start fraction => feature store likely missing/late.
+        expr: |
+          (sum(rate(requests_total{cold_start="true"}[10m]))
+           / sum(rate(requests_total[10m]))) > 0.25
+        for: 10m
+        labels: { severity: page, category: drift }
+        annotations:
+          summary: "Cold-start fraction > 25% (baseline ~12%) — feature store freshness?"
+          runbook: runbooks/rollback.md#trigger-5-drift-or-quality-drop
+
+      - alert: RecommendationQualityDrop
+        # Online CTR guardrail for the live model vs control falls below experiment floor.
+        expr: recoserve:online_ctr:ratio5m < 0.95 * recoserve:online_ctr:control_baseline
+        for: 15m
+        labels: { severity: page, category: quality }
+        annotations:
+          summary: "Live CTR > 5% below control baseline — model quality regression"
+          runbook: runbooks/rollback.md#trigger-5-drift-or-quality-drop

@@ -1,0 +1,106 @@
+# Model Registry specification — RecoServe (Scenario X)
+# Defines the schema every model version must satisfy and the example record for the
+# current Production ranker. The runtime mount (ADR-0002) resolves an experiment arm to a
+# version listed here and pulls `artifact.uri` by `artifact.digest`.
+
+registry:
+  name: recoserve-models
+  backend: s3://recoserve-model-registry         # object store behind the registry
+  # Two independent naming schemes (see ADR-0002). CI uses both; do not conflate.
+  naming:
+    model_version: "ranker-vMAJOR.MINOR.PATCH"    # the artifact / X-Model-Version value
+    image_tag: "recsys-ranker:<semver>-<git-sha>" # the service code image (no model inside)
+  stages: [Staging, Canary, Production, Archived]
+
+# ---- Schema every version MUST populate -------------------------------------------------
+schema:
+  required_fields:
+    - name
+    - version
+    - stage
+    - artifact.uri
+    - artifact.digest          # sha256; verified by init container at mount time
+    - artifact.size_bytes
+    - artifact.format          # onnx
+    - lineage.training_git_sha
+    - lineage.training_data_snapshot
+    - lineage.feature_pipeline_version
+    - lineage.hyperparameters
+    - metrics.offline
+    - approval.approvers       # required to enter Production (dual sign-off)
+    - stage_history
+
+# ---- Example: current Production ranker -------------------------------------------------
+models:
+  - name: ranker
+    version: ranker-v2.4.1
+    stage: Production
+    served_as: "X-Model-Version: ranker-v2.4.1"   # matches api/openapi.yaml + monitoring
+    artifact:
+      uri: s3://recoserve-model-registry/ranker/v2.4.1/model.onnx
+      digest: "sha256:9f1c3a7e5b2d4f6081ac2e9d7b4c1f0a6e8d2b3c5a7f9011223344556677889900"
+      size_bytes: 293601280          # ~280 MB, matches README key numbers
+      format: onnx
+      runtime: onnxruntime>=1.18,cpu
+    lineage:
+      training_git_sha: "a1b2c3d4e5f6"
+      training_data_snapshot: "events-2026-05-12..2026-06-10"   # 30-day window
+      feature_pipeline_version: "fp-7.2.0"
+      hyperparameters:
+        candidates_from_ann: 500
+        ranker_type: "compact-dlrm"
+        embedding_dim: 64
+      trained_by: "ml-eng:dlee"
+    metrics:
+      offline:
+        ndcg_at_10: 0.412          # baseline gate: >= 0.395
+        recall_at_100: 0.731       # baseline gate: >= 0.700
+        parity_check: pass
+      shadow:
+        server_p95_ms: 61          # gate: < 70 (server-side budget, see capacity-plan)
+        scoring_errors_24h: 0
+      experiment:
+        experiment_id: "exp-home-rail-2026-06"
+        guardrail_ctr_delta: "+1.8%"     # non-regression vs control
+        guardrail_p95_delta_ms: "+2"
+    approval:
+      experiment_id: "exp-home-rail-2026-06"
+      approvers:                   # dual sign-off required for Production (lifecycle.md)
+        - role: ml-lead
+          who: "p.santos"
+          at: "2026-06-13T09:20:00Z"
+        - role: product-owner
+          who: "a.khan"
+          at: "2026-06-13T11:05:00Z"
+    stage_history:
+      - { stage: Staging,    at: "2026-06-11T14:00:00Z", by: "ci" }
+      - { stage: Canary,     at: "2026-06-12T08:30:00Z", by: "sre:mwong" }
+      - { stage: Production, at: "2026-06-13T11:05:00Z", by: "product-owner:a.khan" }
+
+  # Prior version retained for instant rollback (runbooks/rollback.md targets this).
+  - name: ranker
+    version: ranker-v2.3.0
+    stage: Archived
+    rollback_eligible: true
+    artifact:
+      uri: s3://recoserve-model-registry/ranker/v2.3.0/model.onnx
+      digest: "sha256:5e4d3c2b1a0f9e8d7c6b5a4938271605f4e3d2c1b0a9988776655443322110000"
+      size_bytes: 290103296
+      format: onnx
+      runtime: onnxruntime>=1.18,cpu
+
+  # Cold-start fallback: baked into the image, lighter gate (see lifecycle.md).
+  - name: fallback
+    version: fallback-v19
+    stage: Production
+    delivery: baked-in-image
+    description: "Popularity + segment recommendations for cold-start / feature-store miss"
+
+# ---- Experiment arm -> model version map (read by runtime mount) ------------------------
+experiment_routing:
+  experiment_id: "exp-home-rail-2026-06"
+  arms:
+    control:   ranker-v2.3.0
+    treatment: ranker-v2.4.1
+  default_arm: control
+  assignment: "server-side hash(user_id) unless X-Experiment-Arm header provided"

@@ -1,0 +1,10 @@
+{
+  "user_id": "u_8675309",
+  "model_version": "ranker-v2.4.1",
+  "cold_start": false,
+  "items": [
+    { "product_id": "p_42", "score": 0.93, "rank": 1 },
+    { "product_id": "p_17", "score": 0.88, "rank": 2 },
+    { "product_id": "p_88", "score": 0.84, "rank": 3 }
+  ]
+}

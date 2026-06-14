@@ -1,0 +1,8 @@
+{
+  "type": "https://api.example.com/problems/not-ready",
+  "title": "Service Unavailable",
+  "status": 503,
+  "detail": "No valid ranker model is currently loaded; serving is degraded.",
+  "instance": "/recommendations",
+  "request_id": "req_01HZX9Q3K8"
+}
